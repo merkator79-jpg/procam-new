@@ -1,344 +1,397 @@
 package com.procamera.iphone17style
 
-import android.content.ContentValues
-import android.content.Context
-import android.graphics.Bitmap
+import android.Manifest
+import android.app.AlertDialog
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.content.res.ColorStateList
+import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.Environment
-import android.provider.MediaStore
-import android.widget.Toast
+import android.provider.Settings
+import android.view.Gravity
+import android.view.MotionEvent
+import android.view.View
+import android.widget.Button
+import android.widget.CheckBox
+import android.widget.FrameLayout
+import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.ProgressBar
+import android.widget.ScrollView
+import android.widget.SeekBar
+import android.widget.TextView
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.compose.setContent
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AddPhotoAlternate
-import androidx.compose.material.icons.filled.AutoAwesome
-import androidx.compose.material.icons.filled.Download
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import androidx.core.graphics.drawable.toBitmap
-import coil.ImageLoader
-import coil.request.ImageRequest
-import coil.request.SuccessResult
-import kotlinx.coroutines.Dispatchers
+import androidx.activity.viewModels
+import androidx.camera.view.PreviewView
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
+    private val model: PhotoViewModel by viewModels()
+    private lateinit var controller: CameraController
+    private lateinit var preview: PreviewView
+    private lateinit var liveImage: ImageView
+    private lateinit var image: ImageView
+    private lateinit var empty: TextView
+    private lateinit var status: TextView
+    private lateinit var badge: TextView
+    private lateinit var progress: ProgressBar
+    private lateinit var shutter: Button
+    private lateinit var flip: Button
+    private lateinit var gallery: Button
+    private lateinit var newCamera: Button
+    private lateinit var save: Button
+    private lateinit var apply: Button
+    private lateinit var permission: Button
+    private lateinit var bracket: CheckBox
+    private val sliders = mutableListOf<SeekBar>()
+    private val labels = mutableListOf<TextView>()
+    private val presets = mutableListOf<Button>()
+    private var syncing = false
+    private var bound = false
+    private var binding = false
+    private var comparing = false
+    private val gold = Color.rgb(255, 214, 10)
+    private val muted = Color.rgb(162, 168, 179)
+    private val panel = Color.rgb(24, 27, 33)
+
+    private val cameraPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) startCamera() else showCameraUnavailable("Нет доступа к камере. Галерея доступна.")
+    }
+    private val storagePermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) model.save() else message("Для сохранения на Android 8–9 разрешите доступ к хранилищу")
+    }
+    private val picker = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) model.open(uri)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent {
-            MaterialTheme(
-                colorScheme = darkColorScheme(
-                    primary = Color(0xFFFFD60A), // Apple Pro Camera Gold Accent
-                    background = Color(0xFF000000),
-                    surface = Color(0xFF141414),
-                    onPrimary = Color.Black,
-                    onBackground = Color.White,
-                    onSurface = Color.White
-                )
-            ) {
-                Surface(modifier = Modifier.fillMaxSize(), color = Color.Black) {
-                    ProCam17Screen()
+        buildScreen()
+        controller = CameraController(this, this, preview)
+        controller.previewParams = { model.state.value.params }
+        controller.shouldAnalyze = {
+            model.state.value.original == null && !model.state.value.busy
+        }
+        controller.onFrame = { bitmap ->
+            liveImage.setImageBitmap(bitmap)
+            liveImage.visibility = View.VISIBLE
+            badge.text = "LIVE · СВЕТ / ДЕТАЛИ / ЦВЕТ"
+        }
+        controller.onPreviewFailure = { reason ->
+            liveImage.visibility = View.GONE
+            liveImage.setImageDrawable(null)
+            badge.text = "PHOTO · ОБРАБОТКА ПОСЛЕ СЪЁМКИ"
+            status.text = reason
+        }
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (model.state.value.busy) { message("Дождитесь завершения операции"); return }
+                if (model.state.value.original != null) model.clear() else finish()
+            }
+        })
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) { model.state.collect { render(it) } }
+        }
+        if (!hasCameraPermission() && !getPreferences(MODE_PRIVATE).getBoolean("cameraAsked", false)) {
+            requestCamera()
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (::controller.isInitialized && model.state.value.original == null && hasCameraPermission()) startCamera()
+    }
+
+    private fun buildScreen() {
+        val root = column().apply {
+            setBackgroundColor(Color.rgb(8, 9, 11))
+            setPadding(dp(16), dp(8), dp(16), dp(8))
+        }
+        val header = row()
+        header.addView(text("ProCam 17", 25f, Color.WHITE, true), LinearLayout.LayoutParams(0, dp(48), 1f))
+        header.addView(button("О проекте") { help() }, LinearLayout.LayoutParams(dp(112), dp(44)))
+        root.addView(header)
+        root.addView(text("СВЕТ  /  ДЕТАЛИ  /  ЦВЕТ", 10f, gold).apply { letterSpacing = 0.16f })
+
+        status = text("Снимите фото или откройте галерею", 12f, muted)
+        status.minLines = 2
+        root.addView(status, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8); bottomMargin = dp(6) })
+
+        val viewport = FrameLayout(this).apply { background = rounded(panel, 18); clipToOutline = true }
+        preview = PreviewView(this).apply {
+            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+            scaleType = PreviewView.ScaleType.FIT_CENTER
+            contentDescription = "Предпросмотр камеры. Коснитесь для фокусировки"
+        }
+        viewport.addView(preview, FrameLayout.LayoutParams(-1, -1))
+        liveImage = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            setBackgroundColor(panel)
+            visibility = View.GONE
+            contentDescription = "Камера с обработкой в реальном времени. Коснитесь для фокусировки"
+            setOnTouchListener { view, event ->
+                if (event.action == MotionEvent.ACTION_UP) {
+                    controller.focus(event.x, event.y)
+                    view.performClick()
+                }
+                true
+            }
+        }
+        viewport.addView(liveImage, FrameLayout.LayoutParams(-1, -1))
+        image = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            contentDescription = "Обработанное фото. Удерживайте, чтобы увидеть оригинал"
+            visibility = View.GONE
+            setOnTouchListener { view, event ->
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> { comparing = true; showBitmap(); true }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        comparing = false; showBitmap(); view.performClick(); true
+                    }
+                    else -> true
                 }
             }
         }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun ProCam17Screen() {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-
-    var originalBitmap by remember { mutableStateOf<Bitmap?>(null) }
-    var processedBitmap by remember { mutableStateOf<Bitmap?>(null) }
-    var isProcessing by remember { mutableStateOf(false) }
-    var showOriginalHold by remember { mutableStateOf(false) }
-
-    var params by remember { mutableStateOf(ProcessingParams()) }
-
-    fun runProcessing(bmp: Bitmap, currentParams: ProcessingParams) {
-        scope.launch {
-            isProcessing = true
-            val res = ApplePhotonicEngine.processImage(context, bmp, currentParams)
-            processedBitmap = res
-            isProcessing = false
+        viewport.addView(image, FrameLayout.LayoutParams(-1, -1))
+        empty = text("Камера загружается…\nМожно выбрать фото из галереи", 15f, muted).apply { gravity = Gravity.CENTER }
+        viewport.addView(empty, FrameLayout.LayoutParams(-1, -1))
+        badge = text("PHOTO", 10f, gold).apply {
+            background = rounded(Color.argb(180, 0, 0, 0), 12)
+            setPadding(dp(12), dp(6), dp(12), dp(6))
         }
-    }
+        viewport.addView(badge, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply {
+            topMargin = dp(12)
+        })
+        progress = ProgressBar(this).apply { indeterminateTintList = ColorStateList.valueOf(gold); visibility = View.GONE }
+        viewport.addView(progress, FrameLayout.LayoutParams(dp(42), dp(42), Gravity.CENTER))
+        root.addView(viewport, LinearLayout.LayoutParams(-1, 0, 1f))
 
-    val pickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent()
-    ) { uri: Uri? ->
-        uri?.let {
-            scope.launch(Dispatchers.IO) {
-                isProcessing = true
-                val loader = ImageLoader(context)
-                val req = ImageRequest.Builder(context)
-                    .data(it)
-                    .allowHardware(false)
-                    .build()
-                val res = (loader.execute(req) as? SuccessResult)?.drawable?.toBitmap()
-                withContext(Dispatchers.Main) {
-                    if (res != null) {
-                        originalBitmap = res
-                        params = ProcessingParams() // Default iPhone 17 Pro Auto-Masterpiece preset
-                        runProcessing(res, params)
-                    } else {
-                        isProcessing = false
-                    }
-                }
+        val controls = column().apply { setPadding(0, dp(8), 0, 0) }
+        val actions = row()
+        gallery = button("Галерея") { picker.launch("image/*") }
+        newCamera = button("Камера") { model.clear(); startCamera() }
+        save = button("Сохранить", true) { requestSave() }
+        addEqual(actions, gallery, newCamera, save)
+        controls.addView(actions)
+
+        val captureRow = row()
+        flip = button("Сменить") { startCamera(true) }
+        shutter = button("●  СНЯТЬ", true) { capturePhoto() }
+        permission = button("Доступ") { requestCamera() }
+        addEqual(captureRow, flip, shutter, permission)
+        controls.addView(captureRow)
+
+        bracket = CheckBox(this).apply {
+            text = "HDR · 3 экспозиции (неподвижная сцена)"
+            textSize = 12f; setTextColor(muted)
+            buttonTintList = ColorStateList.valueOf(gold)
+            isChecked = getPreferences(MODE_PRIVATE).getBoolean("bracket", false)
+            setOnCheckedChangeListener { _, checked ->
+                getPreferences(MODE_PRIVATE).edit().putBoolean("bracket", checked).apply()
             }
         }
-    }
+        controls.addView(bracket)
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Black),
-                title = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("ProCam 17", fontWeight = FontWeight.Bold, color = Color.White)
-                        Spacer(Modifier.width(8.dp))
-                        Surface(
-                            color = Color(0xFFFFD60A),
-                            shape = RoundedCornerShape(4.dp)
-                        ) {
-                            Text(
-                                "PHOTONIC AI",
-                                color = Color.Black,
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.ExtraBold,
-                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                            )
-                        }
+        val presetRow = row()
+        listOf("Естественно" to ProcessingParams(),
+            "Портрет" to ProcessingParams(0.4f, 0.2f, 0.3f, 0.7f),
+            "Контраст" to ProcessingParams(0.8f, 0.6f, 0.65f, 0f)).forEach { (name, params) ->
+            val b = button(name) { model.setParams(params); if (model.state.value.original != null) model.apply() }
+            presets += b
+            presetRow.addView(b, equalParams())
+        }
+        controls.addView(presetRow)
+        listOf("Свет и тени", "Детализация", "Цвет", "Размытие фона · люди").forEachIndexed { index, title ->
+            val label = text(title, 12f, muted)
+            labels += label
+            controls.addView(label, LinearLayout.LayoutParams(-1, dp(22)))
+            val slider = SeekBar(this).apply {
+                max = 100; progressTintList = ColorStateList.valueOf(gold)
+                thumbTintList = ColorStateList.valueOf(gold)
+                contentDescription = title
+                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(seekBar: SeekBar?, value: Int, fromUser: Boolean) {
+                        if (syncing || !fromUser) return
+                        val old = model.state.value.params
+                        val v = value / 100f
+                        model.setParams(when (index) {
+                            0 -> old.copy(smartHdr = v)
+                            1 -> old.copy(deepFusion = v)
+                            2 -> old.copy(photonicColor = v)
+                            else -> old.copy(portraitBokeh = v)
+                        })
                     }
-                },
-                actions = {
-                    if (originalBitmap != null) {
-                        IconButton(onClick = { pickerLauncher.launch("image/*") }) {
-                            Icon(Icons.Default.AddPhotoAlternate, contentDescription = "Новое фото", tint = Color.White)
-                        }
-                        IconButton(onClick = {
-                            processedBitmap?.let { bmp ->
-                                scope.launch {
-                                    saveBitmapToGallery(context, bmp)
-                                }
-                            }
-                        }) {
-                            Icon(Icons.Default.Download, contentDescription = "Сохранить", tint = Color(0xFFFFD60A))
-                        }
-                    }
-                }
-            )
-        },
-        containerColor = Color.Black
-    ) { padding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-        ) {
-            // Image Preview Viewport
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                val displayBmp = if (showOriginalHold) originalBitmap else (processedBitmap ?: originalBitmap)
-                if (displayBmp != null) {
-                    Image(
-                        bitmap = displayBmp.asImageBitmap(),
-                        contentDescription = "Preview",
-                        contentScale = ContentScale.Fit,
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .pointerInput(Unit) {
-                                detectTapGestures(
-                                    onPress = {
-                                        showOriginalHold = true
-                                        tryAwaitRelease()
-                                        showOriginalHold = false
-                                    }
-                                )
-                            }
-                    )
-
-                    // Badge showing Original vs Processed
-                    Surface(
-                        color = Color.Black.copy(alpha = 0.65f),
-                        shape = RoundedCornerShape(16.dp),
-                        modifier = Modifier
-                            .align(Alignment.TopCenter)
-                            .padding(top = 12.dp)
-                    ) {
-                        Text(
-                            text = if (showOriginalHold) "ОРИГИНАЛ" else "iPHONE 17 PRO STYLE (удерживайте для сравнения)",
-                            color = if (showOriginalHold) Color.LightGray else Color(0xFFFFD60A),
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
-                        )
-                    }
-
-                    if (isProcessing) {
-                        CircularProgressIndicator(color = Color(0xFFFFD60A))
-                    }
-                } else {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Icon(
-                            Icons.Default.AutoAwesome,
-                            contentDescription = null,
-                            tint = Color(0xFFFFD60A),
-                            modifier = Modifier.size(56.dp)
-                        )
-                        Spacer(Modifier.height(16.dp))
-                        Text(
-                            "Превратите любое фото в снимок на iPhone 17 Pro",
-                            color = Color.LightGray,
-                            fontSize = 15.sp
-                        )
-                        Spacer(Modifier.height(20.dp))
-                        Button(
-                            onClick = { pickerLauncher.launch("image/*") },
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFFD60A))
-                        ) {
-                            Text("Выбрать фото из галереи", color = Color.Black, fontWeight = FontWeight.Bold)
-                        }
-                    }
-                }
+                    override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
+                    override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
+                })
             }
+            sliders += slider
+            controls.addView(slider, LinearLayout.LayoutParams(-1, dp(30)))
+        }
+        apply = button("Применить настройки", true) { model.apply() }
+        controls.addView(apply, LinearLayout.LayoutParams(-1, dp(48)))
+        controls.addView(text("Удерживайте фото для сравнения с оригиналом", 11f, muted).apply {
+            gravity = Gravity.CENTER; setPadding(0, dp(8), 0, dp(8))
+        })
+        val scroll = ScrollView(this).apply { addView(controls); isFillViewport = false }
+        // Controls scroll on compact displays; preview retains roughly 40% of usable height.
+        root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1.15f))
+        setContentView(root)
+    }
 
-            // Control Panel
-            if (originalBitmap != null) {
-                Surface(
-                    color = Color(0xFF141414),
-                    shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        // Presets Row
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            PresetChip("Авто Шедевр", Modifier.weight(1f)) {
-                                val p = ProcessingParams(0.75f, 0.65f, 0.70f, 0.0f)
-                                params = p
-                                originalBitmap?.let { runProcessing(it, p) }
-                            }
-                            PresetChip("Портрет 17 Pro", Modifier.weight(1f)) {
-                                val p = ProcessingParams(0.70f, 0.55f, 0.75f, 0.75f)
-                                params = p
-                                originalBitmap?.let { runProcessing(it, p) }
-                            }
-                            PresetChip("Максимум HDR", Modifier.weight(1f)) {
-                                val p = ProcessingParams(1.0f, 0.85f, 0.85f, 0.0f)
-                                params = p
-                                originalBitmap?.let { runProcessing(it, p) }
-                            }
-                        }
+    private fun render(state: PhotoState) {
+        val editing = state.original != null
+        status.text = state.status
+        progress.visibility = if (state.busy) View.VISIBLE else View.GONE
+        gallery.isEnabled = !state.busy
+        newCamera.isEnabled = !state.busy
+        save.isEnabled = !state.busy && state.result != null && state.appliedParams == state.params
+        save.text = if (state.saved) "Сохранено ✓" else "Сохранить"
+        apply.isEnabled = !state.busy && editing
+        apply.text = if (editing && state.params != state.appliedParams) "Применить изменения" else "Применить настройки"
+        shutter.visibility = if (editing) View.GONE else View.VISIBLE
+        flip.visibility = if (editing) View.GONE else View.VISIBLE
+        permission.visibility = if (!editing && !hasCameraPermission()) View.VISIBLE else View.GONE
+        bracket.visibility = if (editing) View.GONE else View.VISIBLE
+        bracket.isEnabled = !state.busy && bound
+        shutter.isEnabled = !state.busy && bound
+        flip.isEnabled = !state.busy && bound && controller.hasAlternateCamera
+        presets.forEach { it.isEnabled = !state.busy }
+        syncing = true
+        val values = listOf(state.params.smartHdr, state.params.deepFusion, state.params.photonicColor, state.params.portraitBokeh)
+        val titles = listOf("Свет и тени", "Детализация", "Цвет", "Размытие фона · люди")
+        sliders.forEachIndexed { i, slider ->
+            slider.isEnabled = !state.busy
+            slider.progress = (values[i] * 100).toInt()
+            labels[i].text = "${titles[i]}   ${(values[i] * 100).toInt()}%"
+        }
+        syncing = false
+        image.visibility = if (editing) View.VISIBLE else View.GONE
+        preview.visibility = if (editing) View.GONE else View.VISIBLE
+        if (editing) {
+            liveImage.visibility = View.GONE
+            liveImage.setImageDrawable(null)
+            empty.visibility = View.GONE
+            if (bound) { controller.stop(); bound = false }
+        } else if (hasCameraPermission() && !bound && !binding) startCamera()
+        showBitmap()
+    }
 
-                        Spacer(Modifier.height(12.dp))
+    private fun showBitmap() {
+        val state = model.state.value
+        image.setImageBitmap(if (comparing) state.original else state.result ?: state.original)
+        badge.text = when {
+            state.original == null -> if (liveImage.visibility == View.VISIBLE) "LIVE · ПРЕДПРОСМОТР" else "PHOTO"
+            comparing -> "ОРИГИНАЛ"
+            state.result == null -> "ОБРАБОТКА"
+            else -> "PROCAM · УДЕРЖИВАЙТЕ ДЛЯ СРАВНЕНИЯ"
+        }
+    }
 
-                        ProSlider("Smart HDR 5 (Тени и свет)", params.smartHdr) { v ->
-                            params = params.copy(smartHdr = v)
-                        }
-                        ProSlider("Deep Fusion (Детализация)", params.deepFusion) { v ->
-                            params = params.copy(deepFusion = v)
-                        }
-                        ProSlider("Photonic Color (Цвет и кожа)", params.photonicColor) { v ->
-                            params = params.copy(photonicColor = v)
-                        }
-                        ProSlider("Portrait Bokeh (ИИ размытие фона)", params.portraitBokeh) { v ->
-                            params = params.copy(portraitBokeh = v)
-                        }
-
-                        Spacer(Modifier.height(8.dp))
-
-                        Button(
-                            onClick = { originalBitmap?.let { runProcessing(it, params) } },
-                            modifier = Modifier.fillMaxWidth(),
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFFD60A))
-                        ) {
-                            Text("Применить настройки", color = Color.Black, fontWeight = FontWeight.Bold)
-                        }
-                    }
+    private fun startCamera(switch: Boolean = false) {
+        if (!hasCameraPermission() || binding || model.state.value.original != null || model.state.value.busy) return
+        if (bound && !switch) return
+        binding = true
+        liveImage.visibility = View.GONE
+        liveImage.setImageDrawable(null)
+        lifecycleScope.launch {
+            try {
+                controller.start(switch)
+                if (model.state.value.original != null || model.state.value.busy) {
+                    controller.stop()
+                    return@launch
                 }
+                bound = true
+                empty.visibility = View.GONE
+                shutter.isEnabled = true
+                flip.isEnabled = controller.hasAlternateCamera
+                bracket.isEnabled = true
+                if (!controller.supportsBracket()) bracket.text = "HDR-серия недоступна на этой камере"
+                else bracket.text = "HDR · 3 экспозиции (неподвижная сцена)"
+            } catch (cancel: CancellationException) { throw cancel }
+            catch (error: Exception) { showCameraUnavailable(error.message ?: "Не удалось открыть камеру") }
+            finally { binding = false }
+        }
+    }
+
+    private fun capturePhoto() {
+        if (!bound || !model.beginCapture()) return
+        lifecycleScope.launch {
+            try { model.captured(controller.takePhoto(bracket.isChecked)) }
+            catch (cancel: CancellationException) {
+                model.captureFailed(IllegalStateException("камера закрыта")); throw cancel
             }
+            catch (error: Exception) { model.captureFailed(error) }
         }
     }
-}
 
-@Composable
-fun PresetChip(title: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
-    OutlinedButton(
-        onClick = onClick,
-        modifier = modifier,
-        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
-        shape = RoundedCornerShape(10.dp)
-    ) {
-        Text(title, fontSize = 11.sp, color = Color.White, maxLines = 1)
+    private fun requestCamera() {
+        if (hasCameraPermission()) { startCamera(); return }
+        val prefs = getPreferences(MODE_PRIVATE)
+        if (prefs.getBoolean("cameraAsked", false) && !shouldShowRequestPermissionRationale(Manifest.permission.CAMERA)) {
+            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+        } else {
+            prefs.edit().putBoolean("cameraAsked", true).apply()
+            cameraPermission.launch(Manifest.permission.CAMERA)
+        }
     }
-}
 
-@Composable
-fun ProSlider(label: String, value: Float, onValueChange: (Float) -> Unit) {
-    Column(modifier = Modifier.padding(vertical = 2.dp)) {
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(label, fontSize = 12.sp, color = Color.LightGray)
-            Text("${(value * 100).toInt()}%", fontSize = 12.sp, color = Color(0xFFFFD60A), fontWeight = FontWeight.Bold)
-        }
-        Slider(
-            value = value,
-            onValueChange = onValueChange,
-            colors = SliderDefaults.colors(
-                thumbColor = Color(0xFFFFD60A),
-                activeTrackColor = Color(0xFFFFD60A),
-                inactiveTrackColor = Color.DarkGray
-            ),
-            modifier = Modifier.height(28.dp)
-        )
+    private fun requestSave() {
+        if (Build.VERSION.SDK_INT <= 28 && ContextCompat.checkSelfPermission(this,
+                Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
+            storagePermission.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        } else model.save()
     }
-}
 
-suspend fun saveBitmapToGallery(context: Context, bitmap: Bitmap) = withContext(Dispatchers.IO) {
-    val filename = "ProCam17_${System.currentTimeMillis()}.jpg"
-    val contentValues = ContentValues().apply {
-        put(MediaStore.MediaColumns.DISPLAY_NAME, filename)
-        put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/ProCam17")
-        }
+    private fun hasCameraPermission() = ContextCompat.checkSelfPermission(this,
+        Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+
+    private fun showCameraUnavailable(reason: String) {
+        bound = false; shutter.isEnabled = false; flip.isEnabled = false
+        empty.visibility = View.VISIBLE; empty.text = "$reason\nОткройте фото из галереи"
     }
-    val uri = context.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
-    uri?.let {
-        context.contentResolver.openOutputStream(it)?.use { out ->
-            bitmap.compress(Bitmap.CompressFormat.JPEG, 96, out)
-        }
-        withContext(Dispatchers.Main) {
-            Toast.makeText(context, "Сохранено в Галерею (папка ProCam17)!", Toast.LENGTH_LONG).show()
-        }
+
+    private fun help() = AlertDialog.Builder(this).setTitle("ProCam 17 Studio")
+        .setMessage("Съёмка и обработка в стиле современной мобильной фотографии.\n\n" +
+            "Коснитесь превью для фокусировки. Для HDR-серии держите телефон неподвижно: снимаются три JPEG с разной экспозицией. При движении приложение может использовать один кадр.\n\n" +
+            "В LIVE видны свет, детали, цвет и приближённое портретное размытие. Превью уменьшено и обновляется до 10 раз/с; итоговый снимок обрабатывается отдельно. На слабых устройствах live может быть медленнее или недоступен.\n\n" +
+            "Портретное размытие предназначено для людей. Фото обрабатываются на устройстве. Максимальная длинная сторона результата — 2048 пикселей.\n\n" +
+            "Это независимые эффекты, а не алгоритмы Apple Smart HDR / Deep Fusion. Приложение не связано с Apple.")
+        .setPositiveButton("Понятно", null).show()
+
+    private fun message(value: String) { android.widget.Toast.makeText(this, value, android.widget.Toast.LENGTH_LONG).show() }
+    override fun onDestroy() { if (::controller.isInitialized) controller.close(); super.onDestroy() }
+    private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
+    private fun row() = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+    private fun column() = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+    private fun text(value: String, size: Float, color: Int, bold: Boolean = false) = TextView(this).apply {
+        text = value; textSize = size; setTextColor(color); gravity = Gravity.CENTER_VERTICAL
+        if (bold) setTypeface(typeface, Typeface.BOLD)
     }
+    private fun button(value: String, primary: Boolean = false, action: () -> Unit) = Button(this).apply {
+        text = value; textSize = 12f; isAllCaps = false; minWidth = 0; minimumWidth = 0
+        setPadding(dp(6), 0, dp(6), 0)
+        backgroundTintList = ColorStateList(arrayOf(intArrayOf(-android.R.attr.state_enabled), intArrayOf()),
+            intArrayOf(Color.rgb(48, 48, 48), if (primary) gold else panel))
+        setTextColor(ColorStateList(arrayOf(intArrayOf(-android.R.attr.state_enabled), intArrayOf()),
+            intArrayOf(Color.rgb(105, 105, 105), if (primary) Color.BLACK else Color.WHITE)))
+        setOnClickListener { action() }
+    }
+    private fun rounded(color: Int, radius: Int) = GradientDrawable().apply {
+        setColor(color); cornerRadius = dp(radius).toFloat()
+    }
+    private fun equalParams() = LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginEnd = dp(4) }
+    private fun addEqual(row: LinearLayout, vararg views: View) { views.forEach { row.addView(it, equalParams()) } }
 }
