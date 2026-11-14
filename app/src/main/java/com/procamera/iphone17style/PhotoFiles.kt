@@ -24,8 +24,8 @@ object PhotoFiles {
     suspend fun decode(context: Context, uri: Uri): Bitmap = withContext(Dispatchers.IO) {
         val resolver = context.contentResolver
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
-            ?: throw IOException("Не удалось открыть фото")
+        val boundsStream = resolver.openInputStream(uri) ?: throw IOException("Не удалось открыть фото")
+        boundsStream.use { BitmapFactory.decodeStream(it, null, bounds) }
         require(bounds.outWidth > 0 && bounds.outHeight > 0) { "Неподдерживаемый формат фото" }
         var sample = 1
         while (max(bounds.outWidth, bounds.outHeight) / sample > MAX_DIMENSION * 2) sample *= 2
