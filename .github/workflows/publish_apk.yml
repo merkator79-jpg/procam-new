@@ -1,0 +1,48 @@
+name: Publish downloadable APK
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/publish_apk.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Download tested APK from successful build 8
+        run: gh run download 43626040047 --name ProCam17-debug-APK --dir dist
+      - name: Verify downloaded APK against build checksum
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, zipfile
+          root = Path('dist')
+          apk = root / 'app-debug.apk'
+          expected = (root / 'SHA256SUMS.txt').read_text().split()[0]
+          digest = hashlib.sha256(apk.read_bytes()).hexdigest()
+          if digest != expected:
+              raise SystemExit('APK checksum mismatch')
+          with zipfile.ZipFile(apk) as z:
+              if z.testzip() is not None or 'AndroidManifest.xml' not in z.namelist():
+                  raise SystemExit('Invalid APK archive')
+          apk.rename(root / 'ProCam17.apk')
+          (root / 'SHA256SUMS.txt').write_text(digest + '  ProCam17.apk\n')
+          print('Verified APK SHA-256:', digest)
+          PY
+      - name: Publish APK for direct download
+        run: |
+          gh release create v2.1.0 --target "$GITHUB_SHA" \
+            --title 'ProCam17 2.1.0 — Android test build' \
+            --notes 'Camera, live processing and gallery editor. APK from successful build #8; verified SHA-256. Debug-signed test build; on-device validation is pending.' \
+            dist/ProCam17.apk dist/SHA256SUMS.txt
